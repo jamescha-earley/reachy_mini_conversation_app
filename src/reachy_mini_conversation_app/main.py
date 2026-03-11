@@ -48,6 +48,7 @@ def run(
     from reachy_mini_conversation_app.openai_realtime import OpenaiRealtimeHandler
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
     from reachy_mini_conversation_app.audio.head_wobbler import HeadWobbler
+    from reachy_mini_conversation_app.face_db import FaceDatabase
 
     logger = setup_logger(args.debug)
     logger.info("Starting Reachy Mini Conversation App")
@@ -100,6 +101,23 @@ def run(
 
     camera_worker, _, vision_manager = handle_vision_stuff(args, robot)
 
+    # Initialize face recognition (optional - gracefully handles missing dependencies)
+    face_db = None
+    face_recognizer = None
+    try:
+        face_db = FaceDatabase()
+        logger.info("Face database initialized")
+
+        from reachy_mini_conversation_app.vision.face_recognition import FaceRecognizer
+        # Use upsample=2 to better detect faces at various distances
+        face_recognizer = FaceRecognizer(model="hog", upsample=2)
+        logger.info("Face recognizer initialized")
+    except ImportError as e:
+        logger.warning(f"Face recognition not available: {e}")
+        logger.info("Install with: pip install '.[face_recognition]'")
+    except Exception as e:
+        logger.warning(f"Failed to initialize face recognition: {e}")
+
     movement_manager = MovementManager(
         current_robot=robot,
         camera_worker=camera_worker,
@@ -113,6 +131,8 @@ def run(
         camera_worker=camera_worker,
         vision_manager=vision_manager,
         head_wobbler=head_wobbler,
+        face_db=face_db,
+        face_recognizer=face_recognizer,
     )
     current_file_path = os.path.dirname(os.path.abspath(__file__))
     logger.debug(f"Current file absolute path: {current_file_path}")

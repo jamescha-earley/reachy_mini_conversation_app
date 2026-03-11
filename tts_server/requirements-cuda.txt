@@ -1,0 +1,21 @@
+# TTS Server requirements - CUDA / Docker / SPCS
+#
+# Setup:
+#   python -m venv .venv && source .venv/bin/activate && pip install -r requirements-cuda.txt
+#
+# For Apple Silicon local dev, use requirements.txt (MLX backend) instead.
+# qwen-tts and mlx-audio pin conflicting transformers versions and cannot coexist.
+
+# --- Core server ---
+fastapi>=0.100.0
+uvicorn>=0.23.0
+pydantic>=2.0.0
+python-multipart>=0.0.6      # For file upload endpoints
+
+# --- Audio processing ---
+numpy>=1.24.0
+soundfile>=0.12.0             # WAV file I/O
+librosa>=0.10.0               # Pitch shifting
+
+# --- TTS backend: PyTorch / CUDA ---
+qwen-tts>=0.1.0               # Qwen3-TTS model (pins transformers==4.57.3, accelerate==1.12.0)

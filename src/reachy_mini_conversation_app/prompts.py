@@ -13,6 +13,7 @@ PROFILES_DIRECTORY = Path(__file__).parent / "profiles"
 PROMPTS_LIBRARY_DIRECTORY = Path(__file__).parent / "prompts"
 INSTRUCTIONS_FILENAME = "instructions.txt"
 VOICE_FILENAME = "voice.txt"
+VOICE_SAMPLE_FILENAME = "voice_sample.wav"
 
 
 def _expand_prompt_includes(content: str) -> str:
@@ -102,3 +103,36 @@ def get_session_voice(default: str = "cedar") -> str:
     except Exception:
         pass
     return default
+
+
+def get_voice_sample_path() -> str | None:
+    """Resolve the path to a voice sample for TTS voice cloning.
+
+    Checks in order:
+    1. VOICE_SAMPLE_PATH from config/environment
+    2. voice_sample.wav in the current profile directory
+
+    Returns:
+        Path to voice sample WAV file, or None if not found.
+
+    """
+    # First check config/environment override
+    if config.VOICE_SAMPLE_PATH:
+        sample_path = Path(config.VOICE_SAMPLE_PATH)
+        if sample_path.exists():
+            logger.debug(f"Using voice sample from config: {sample_path}")
+            return str(sample_path)
+        logger.warning(f"VOICE_SAMPLE_PATH configured but file not found: {config.VOICE_SAMPLE_PATH}")
+
+    # Check profile directory
+    profile = config.REACHY_MINI_CUSTOM_PROFILE
+    if profile:
+        try:
+            sample_file = PROFILES_DIRECTORY / profile / VOICE_SAMPLE_FILENAME
+            if sample_file.exists():
+                logger.debug(f"Using voice sample from profile: {sample_file}")
+                return str(sample_file)
+        except Exception as e:
+            logger.warning(f"Error checking profile voice sample: {e}")
+
+    return None

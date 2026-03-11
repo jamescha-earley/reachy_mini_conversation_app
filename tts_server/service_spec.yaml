@@ -1,0 +1,26 @@
+spec:
+  containers:
+    - name: tts-service
+      image: <IMAGE_REGISTRY>/tts_service:latest
+      resources:
+        requests:
+          nvidia.com/gpu: 1
+          memory: 16Gi
+          cpu: 4
+        limits:
+          nvidia.com/gpu: 1
+          memory: 32Gi
+          cpu: 8
+      env:
+        NVIDIA_VISIBLE_DEVICES: all
+        CUDA_VISIBLE_DEVICES: "0"
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 10
+  endpoints:
+    - name: tts-api
+      port: 8000
+      public: true

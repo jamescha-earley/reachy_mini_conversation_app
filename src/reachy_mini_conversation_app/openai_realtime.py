@@ -17,7 +17,7 @@ from scipy.signal import resample
 from websockets.exceptions import ConnectionClosedError
 
 from reachy_mini_conversation_app.config import config
-from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions
+from reachy_mini_conversation_app.prompts import get_session_voice, get_session_instructions, get_voice_sample_path
 from reachy_mini_conversation_app.tools.core_tools import (
     ToolDependencies,
     get_tool_specs,
@@ -69,13 +69,216 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         self.partial_transcript_sequence: int = 0  # sequence counter to prevent stale emissions
         self.partial_debounce_delay = 0.5  # seconds
 
+        # Sentence streaming for custom TTS
+        self._tts_buffer = ""  # Accumulated text waiting for sentence boundary
+        self._tts_sent_length = 0  # How much of the buffer has been sent to TTS
+        self._tts_lock = asyncio.Lock()  # Serialize TTS generation to prevent audio interleaving
+
         # Internal lifecycle flags
         self._shutdown_requested: bool = False
         self._connected_event: asyncio.Event = asyncio.Event()
 
+        # TTS engine for voice cloning (Qwen3-TTS)
+        self._tts_engine = None
+        self._use_custom_tts = config.TTS_ENGINE.lower() == "qwen3"
+        if self._use_custom_tts:
+            self._init_tts_engine()
+
     def copy(self) -> "OpenaiRealtimeHandler":
         """Create a copy of the handler."""
         return OpenaiRealtimeHandler(self.deps, self.gradio_mode, self.instance_path)
+
+    def _init_tts_engine(self) -> None:
+        """Initialize the Qwen3-TTS engine for voice cloning."""
+        try:
+            from reachy_mini_conversation_app.tts import Qwen3TTSEngine
+
+            voice_sample = get_voice_sample_path()
+            if not voice_sample:
+                logger.warning(
+                    "TTS_ENGINE=qwen3 but no voice sample found. "
+                    "Add voice_sample.wav to your profile or set VOICE_SAMPLE_PATH."
+                )
+            self._tts_engine = Qwen3TTSEngine(voice_sample_path=voice_sample)
+            logger.info(f"Qwen3-TTS engine initialized with voice sample: {voice_sample}")
+        except ImportError as e:
+            logger.error(
+                "Failed to initialize Qwen3-TTS: %s. "
+                "Install with: pip install 'reachy_mini_conversation_app[voice_clone]'",
+                e,
+            )
+            self._use_custom_tts = False
+
+    def _extract_complete_sentences(self, text: str) -> tuple[str, str]:
+        """Extract complete sentences from text buffer.
+        
+        Returns:
+            Tuple of (complete_sentences, remaining_text)
+        """
+        import re
+        # Find the last sentence boundary (. ! ? followed by space or end)
+        # Be careful with abbreviations like "Dr." or "Mr."
+        pattern = r'([.!?])(?:\s|$)'
+        matches = list(re.finditer(pattern, text))
+        
+        if matches:
+            last_match = matches[-1]
+            end_pos = last_match.end()
+            return text[:end_pos].strip(), text[end_pos:].strip()
+        return "", text
+
+    async def _process_tts_delta(self, delta: str) -> None:
+        """Process incoming transcript delta for sentence-based TTS streaming."""
+        if not self._use_custom_tts or not delta:
+            return
+            
+        # Add delta to buffer
+        self._tts_buffer += delta
+        
+        # Check for complete sentences
+        complete, remaining = self._extract_complete_sentences(self._tts_buffer)
+        
+        if complete and len(complete) > self._tts_sent_length:
+            # Get the new complete text we haven't sent yet
+            new_text = complete[self._tts_sent_length:].strip()
+            
+            if new_text and not new_text.startswith("{") and not new_text.startswith("["):
+                logger.info(f"Streaming TTS for sentence: {new_text[:50]}...")
+                asyncio.create_task(self._generate_tts_audio(new_text))
+            
+            self._tts_sent_length = len(complete)
+
+    def _reset_tts_buffer(self) -> None:
+        """Reset TTS buffer for new response."""
+        self._tts_buffer = ""
+        self._tts_sent_length = 0
+
+    async def _generate_tts_audio(self, text: str) -> None:
+        """Generate audio from text using Qwen3-TTS and queue it for playback.
+
+        Args:
+            text: The text to convert to speech.
+
+        """
+        if not self._tts_engine or not text.strip():
+            return
+
+        import re
+        
+        # Extract and trigger action markers before stripping them
+        action_markers = re.findall(r'\(([^)]+)\)', text)
+        if action_markers:
+            asyncio.create_task(self._trigger_action_markers(action_markers))
+        
+        # Strip action markers for TTS
+        text = re.sub(r'\([^)]*\)', '', text).strip()
+        
+        # Skip if nothing left after stripping
+        if not text:
+            return
+
+        try:
+            logger.debug(f"Generating TTS audio for: {text[:50]}...")
+
+            # Serialize TTS generation to prevent audio chunk interleaving
+            async with self._tts_lock:
+                # Generate audio chunks and queue them
+                async for audio_chunk, sample_rate in self._tts_engine.generate_streaming(text):
+                    # Feed to head wobbler for natural movements
+                    if self.deps.head_wobbler is not None:
+                        # Convert to base64 for head wobbler (it expects this format)
+                        audio_b64 = base64.b64encode(audio_chunk.tobytes()).decode("utf-8")
+                        self.deps.head_wobbler.feed(audio_b64)
+
+                    # Update activity time
+                    self.last_activity_time = asyncio.get_event_loop().time()
+
+                    # Queue audio for playback
+                    await self.output_queue.put(
+                        (sample_rate, audio_chunk.reshape(1, -1)),
+                    )
+
+            logger.debug("TTS audio generation complete")
+
+        except Exception as e:
+            logger.error(f"TTS audio generation failed: {e}")
+            # Fall back to showing text only
+            await self.output_queue.put(
+                AdditionalOutputs({"role": "assistant", "content": f"[TTS error: {e}]"})
+            )
+
+    async def _trigger_action_markers(self, markers: list[str]) -> None:
+        """Trigger robot movements based on action markers in text.
+        
+        Maps common action markers like (Nods), (Shakes head) to robot movements.
+        Runs asynchronously to not block TTS.
+        
+        Args:
+            markers: List of action marker strings (without parentheses).
+        """
+        from reachy_mini_conversation_app.dance_emotion_moves import GotoQueueMove
+        
+        # Mapping of action markers to head movements (pitch, yaw in degrees)
+        # Format: marker_keywords -> list of (pitch, yaw, duration) movements
+        ACTION_MAP = {
+            # Nodding - quick down then back
+            ("nod", "nods", "nodding"): [
+                (20, 0, 0.2),   # Look down
+                (0, 0, 0.2),    # Back to center
+            ],
+            # Shaking head - left-right-left
+            ("shake", "shakes", "shaking head", "no"): [
+                (0, -15, 0.15),  # Look left
+                (0, 15, 0.15),   # Look right
+                (0, 0, 0.15),    # Back to center
+            ],
+            # Looking up
+            ("look up", "looks up", "looking up", "glances up"): [
+                (-15, 0, 0.3),   # Look up
+                (0, 0, 0.3),     # Back to center
+            ],
+            # Looking down
+            ("look down", "looks down", "looking down", "glances down"): [
+                (15, 0, 0.3),    # Look down
+                (0, 0, 0.3),     # Back to center
+            ],
+            # Tilting head (curious)
+            ("tilt", "tilts", "tilts head", "curious"): [
+                (5, 10, 0.3),    # Slight tilt
+                (0, 0, 0.3),     # Back to center
+            ],
+            # Looking away/aside
+            ("looks away", "looking away", "glances away"): [
+                (0, 20, 0.3),    # Look to side
+                (0, 0, 0.4),     # Back to center
+            ],
+        }
+        
+        movement_manager = self.deps.movement_manager
+        if not movement_manager:
+            return
+        
+        for marker in markers:
+            marker_lower = marker.lower().strip()
+            
+            # Find matching action
+            for keywords, movements in ACTION_MAP.items():
+                if any(kw in marker_lower for kw in keywords):
+                    logger.debug(f"Action marker '{marker}' -> triggering movement")
+                    
+                    # Queue each movement in sequence
+                    for pitch, yaw, duration in movements:
+                        try:
+                            move = GotoQueueMove(
+                                target_pitch=pitch,
+                                target_yaw=yaw,
+                                duration=duration
+                            )
+                            movement_manager.queue_move(move)
+                            await asyncio.sleep(duration)  # Wait for move to complete
+                        except Exception as e:
+                            logger.warning(f"Failed to trigger action '{marker}': {e}")
+                    break  # Only match first action per marker
 
     async def apply_personality(self, profile: str | None) -> str:
         """Apply a new personality (profile) at runtime if possible.
@@ -233,38 +436,55 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
         """Establish and manage a single realtime session."""
         async with self.client.realtime.connect(model=config.MODEL_NAME) as conn:
             try:
-                await conn.session.update(
-                    session={
-                        "type": "realtime",
-                        "instructions": get_session_instructions(),
-                        "audio": {
-                            "input": {
-                                "format": {
-                                    "type": "audio/pcm",
-                                    "rate": self.input_sample_rate,
-                                },
-                                "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
-                                "turn_detection": {
-                                    "type": "server_vad",
-                                    "interrupt_response": True,
-                                },
+                # Build session config - adjust based on TTS engine
+                session_config: dict = {
+                    "type": "realtime",
+                    "instructions": get_session_instructions(),
+                    "audio": {
+                        "input": {
+                            "format": {
+                                "type": "audio/pcm",
+                                "rate": self.input_sample_rate,
                             },
-                            "output": {
-                                "format": {
-                                    "type": "audio/pcm",
-                                    "rate": self.output_sample_rate,
-                                },
-                                "voice": get_session_voice(),
+                            "transcription": {"model": "gpt-4o-transcribe", "language": "en"},
+                            "turn_detection": {
+                                "type": "server_vad",
+                                "interrupt_response": True,
                             },
                         },
-                        "tools": get_tool_specs(),  # type: ignore[typeddict-item]
-                        "tool_choice": "auto",
                     },
-                )
+                    "tools": get_tool_specs(),  # type: ignore[typeddict-item]
+                    "tool_choice": "auto",
+                }
+
+                # Configure audio output based on TTS engine
+                if self._use_custom_tts:
+                    # Using Qwen3-TTS: still configure OpenAI audio (for API compatibility)
+                    # but we'll ignore it and use Qwen3-TTS output instead
+                    session_config["audio"]["output"] = {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": self.output_sample_rate,
+                        },
+                        "voice": get_session_voice(),
+                    }
+                    logger.info("Using Qwen3-TTS for voice output (OpenAI audio will be ignored)")
+                else:
+                    # Using OpenAI TTS: enable audio output with selected voice
+                    session_config["audio"]["output"] = {
+                        "format": {
+                            "type": "audio/pcm",
+                            "rate": self.output_sample_rate,
+                        },
+                        "voice": get_session_voice(),
+                    }
+
+                await conn.session.update(session=session_config)
                 logger.info(
-                    "Realtime session initialized with profile=%r voice=%r",
+                    "Realtime session initialized with profile=%r voice=%r tts_engine=%s",
                     getattr(config, "REACHY_MINI_CUSTOM_PROFILE", None),
-                    get_session_voice(),
+                    get_session_voice() if not self._use_custom_tts else "qwen3-clone",
+                    config.TTS_ENGINE,
                 )
                 # If we reached here, the session update succeeded which implies the API key worked.
                 # Persist the key to a newly created .env (copied from .env.example) if needed.
@@ -305,10 +525,19 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
                 if event.type == "response.created":
                     logger.debug("Response created")
+                    # Reset TTS buffer for new response
+                    if self._use_custom_tts:
+                        self._reset_tts_buffer()
 
                 if event.type == "response.done":
                     # Doesn't mean the audio is done playing
                     logger.debug("Response done")
+
+                # Handle assistant transcript deltas for streaming TTS
+                if event.type in ("response.audio_transcript.delta", "response.output_audio_transcript.delta"):
+                    delta = getattr(event, "delta", "")
+                    if delta and self._use_custom_tts:
+                        await self._process_tts_delta(delta)
 
                 # Handle partial transcription (user speaking in real-time)
                 if event.type == "conversation.item.input_audio_transcription.partial":
@@ -345,13 +574,43 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
 
                     await self.output_queue.put(AdditionalOutputs({"role": "user", "content": event.transcript}))
 
-                # Handle assistant transcription
+                # Handle assistant transcription (OpenAI TTS mode)
                 if event.type in ("response.audio_transcript.done", "response.output_audio_transcript.done"):
-                    logger.debug(f"Assistant transcript: {event.transcript}")
+                    logger.info(f"audio_transcript.done received")
                     await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": event.transcript}))
+                    # If using custom TTS, only generate for remaining text not already sent
+                    if self._use_custom_tts and event.transcript:
+                        # Get any remaining text that wasn't sent during streaming
+                        remaining = self._tts_buffer[self._tts_sent_length:].strip()
+                        logger.info(f"TTS buffer: sent={self._tts_sent_length}, total={len(self._tts_buffer)}, remaining='{remaining[:30] if remaining else 'none'}...'")
+                        if remaining and not remaining.startswith("{") and not remaining.startswith("["):
+                            logger.info(f"TTS for remaining text: {remaining[:50]}...")
+                            asyncio.create_task(self._generate_tts_audio(remaining))
+                        # Reset for next response
+                        self._reset_tts_buffer()
 
-                # Handle audio delta
+                # Handle text response (Qwen3-TTS mode - text-only responses)
+                if event.type == "response.text.done" and self._use_custom_tts:
+                    text = getattr(event, "text", "")
+                    logger.debug(f"Assistant text response: {text}")
+                    await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": text}))
+                    # Note: TTS already handled by streaming in _process_tts_delta
+
+                # Handle content part done (alternative text response format)
+                if event.type == "response.content_part.done" and self._use_custom_tts:
+                    part = getattr(event, "part", {})
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text = part.get("text", "")
+                        if text:
+                            logger.debug(f"Assistant content part text: {text}")
+                            await self.output_queue.put(AdditionalOutputs({"role": "assistant", "content": text}))
+                            # Note: TTS already handled by streaming in _process_tts_delta
+
+                # Handle audio delta (OpenAI TTS mode only)
                 if event.type in ("response.audio.delta", "response.output_audio.delta"):
+                    # Skip if using custom TTS (there won't be audio deltas anyway)
+                    if self._use_custom_tts:
+                        continue
                     if self.deps.head_wobbler is not None:
                         self.deps.head_wobbler.feed(event.delta)
                     self.last_activity_time = asyncio.get_event_loop().time()
@@ -484,6 +743,16 @@ class OpenaiRealtimeHandler(AsyncStreamHandler):
             return
 
         input_sample_rate, audio_frame = frame
+
+        # Debug: log audio level periodically
+        if hasattr(self, '_audio_log_counter'):
+            self._audio_log_counter += 1
+        else:
+            self._audio_log_counter = 0
+        
+        if self._audio_log_counter % 100 == 0:  # Log every 100 frames (~2 seconds)
+            level = np.abs(audio_frame).mean()
+            logger.debug(f"Audio input level: {level:.1f} (frame shape: {audio_frame.shape})")
 
         # Reshape if needed
         if audio_frame.ndim == 2:

@@ -29,7 +29,30 @@ class Config:
     LOCAL_VISION_MODEL = os.getenv("LOCAL_VISION_MODEL", "HuggingFaceTB/SmolVLM2-2.2B-Instruct")
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
 
+    # TTS Engine configuration
+    # Options: "openai" (default, uses OpenAI Realtime voices) or "qwen3" (uses Qwen3-TTS with voice cloning)
+    TTS_ENGINE = os.getenv("TTS_ENGINE", "openai")
+    # Path to voice sample for Qwen3-TTS voice cloning (optional, can also use profile voice_sample.wav)
+    VOICE_SAMPLE_PATH = os.getenv("VOICE_SAMPLE_PATH")
+    # URL of TTS service (for SPCS deployment)
+    TTS_SERVICE_URL = os.getenv("TTS_SERVICE_URL", "http://localhost:8000")
+
     logger.debug(f"Model: {MODEL_NAME}, HF_HOME: {HF_HOME}, Vision Model: {LOCAL_VISION_MODEL}")
+    logger.debug(f"TTS Engine: {TTS_ENGINE}, Voice Sample: {VOICE_SAMPLE_PATH}")
+
+    # MCP Server configuration (for Snowflake Agent tool)
+    SNOWFLAKE_MCP_SERVER_URL = os.getenv("SNOWFLAKE_MCP_SERVER_URL", "http://localhost:5000")
+    SNOWFLAKE_MCP_PAT = os.getenv("SNOWFLAKE_MCP_PAT", "")
+    SNOWFLAKE_MCP_VERIFY_SSL = os.getenv("SNOWFLAKE_MCP_VERIFY_SSL", "true").lower() in ("true", "1", "yes")
+
+    # Cortex Agent REST API configuration
+    SNOWFLAKE_AGENT_HOST = os.getenv("SNOWFLAKE_AGENT_HOST", "")
+    SNOWFLAKE_AGENT_DATABASE = os.getenv("SNOWFLAKE_AGENT_DATABASE", "")
+    SNOWFLAKE_AGENT_SCHEMA = os.getenv("SNOWFLAKE_AGENT_SCHEMA", "")
+    SNOWFLAKE_AGENT_NAME = os.getenv("SNOWFLAKE_AGENT_NAME", "")
+
+    # Shared backend URL (for Streamlit + robot coordination)
+    AGENT_BACKEND_URL = os.getenv("AGENT_BACKEND_URL", "")
 
     REACHY_MINI_CUSTOM_PROFILE = os.getenv("REACHY_MINI_CUSTOM_PROFILE")
     logger.debug(f"Custom Profile: {REACHY_MINI_CUSTOM_PROFILE}")

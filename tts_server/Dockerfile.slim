@@ -1,0 +1,32 @@
+# Use the official Python slim image with manual CUDA setup for SPCS
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libsndfile1 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies (CPU-only qwen-tts for now, GPU will be added by SPCS)
+RUN pip install --no-cache-dir \
+    torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir \
+    qwen-tts>=0.1.0 \
+    fastapi>=0.100.0 \
+    uvicorn>=0.23.0 \
+    python-multipart>=0.0.6 \
+    soundfile>=0.12.0
+
+# Copy application code
+COPY app.py .
+
+# Create directory for voice samples
+RUN mkdir -p /tmp/voices
+
+# Expose port
+EXPOSE 8000
+
+# Run the service
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

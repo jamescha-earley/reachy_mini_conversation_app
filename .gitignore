@@ -59,3 +59,8 @@ cache/
 
 # User-created personalities (managed by UI)
 src/reachy_mini_conversation_app/profiles/user_personalities/
+
+#Audio Files
+*.wav
+# Exception: voice samples used by profiles for TTS cloning
+!src/reachy_mini_conversation_app/profiles/**/voice_sample.wav
