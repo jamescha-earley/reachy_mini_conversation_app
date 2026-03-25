@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional
 
 from fastapi import FastAPI
 
-from .config import config
+from .config import LOCKED_PROFILE, AVAILABLE_VOICES, config
 from .openai_realtime import OpenaiRealtimeHandler
 from .headless_personality import (
     DEFAULT_OPTION,
@@ -76,7 +76,13 @@ def mount_personality_routes(
     @app.get("/personalities")
     def _list() -> dict:  # type: ignore
         choices = [DEFAULT_OPTION, *list_personalities()]
-        return {"choices": choices, "current": _current_choice(), "startup": _startup_choice()}
+        return {
+            "choices": choices,
+            "current": _current_choice(),
+            "startup": _startup_choice(),
+            "locked": LOCKED_PROFILE is not None,
+            "locked_to": LOCKED_PROFILE,
+        }
 
     @app.get("/personalities/load")
     def _load(name: str) -> dict:  # type: ignore
@@ -206,6 +212,11 @@ def mount_personality_routes(
         persist: Optional[bool] = None,
         request: Optional[Request] = None,
     ) -> dict:  # type: ignore
+        if LOCKED_PROFILE is not None:
+            return JSONResponse(
+                {"ok": False, "error": "profile_locked", "locked_to": LOCKED_PROFILE},
+                status_code=403,
+            )  # type: ignore
         loop = get_loop()
         if loop is None:
             return JSONResponse({"ok": False, "error": "loop_unavailable"}, status_code=503)  # type: ignore
@@ -261,16 +272,16 @@ def mount_personality_routes(
     async def _voices() -> list[str]:
         loop = get_loop()
         if loop is None:
-            return ["cedar"]
+            return list(AVAILABLE_VOICES)
 
         async def _get_v() -> list[str]:
             try:
                 return await handler.get_available_voices()
             except Exception:
-                return ["cedar"]
+                return list(AVAILABLE_VOICES)
 
         try:
             fut = asyncio.run_coroutine_threadsafe(_get_v(), loop)
             return fut.result(timeout=10)
         except Exception:
-            return ["cedar"]
+            return list(AVAILABLE_VOICES)

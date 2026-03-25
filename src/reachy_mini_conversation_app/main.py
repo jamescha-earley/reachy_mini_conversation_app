@@ -15,9 +15,10 @@ from gradio.utils import get_space
 
 from reachy_mini import ReachyMini, ReachyMiniApp
 from reachy_mini_conversation_app.utils import (
+    CameraVisionInitializationError,
     parse_args,
     setup_logger,
-    handle_vision_stuff,
+    initialize_camera_and_vision,
     log_connection_troubleshooting,
 )
 
@@ -91,15 +92,26 @@ def run(
             logger.error("Please check your configuration and try again.")
             sys.exit(1)
 
-    # Check if running in simulation mode without --gradio
-    if robot.client.get_status()["simulation_enabled"] and not args.gradio:
-        logger.error(
-            "Simulation mode requires Gradio interface. Please use --gradio flag when running in simulation mode."
-        )
-        robot.client.disconnect()
-        sys.exit(1)
+    # Auto-enable Gradio in simulation mode (both MuJoCo for daemon and mockup-sim for desktop app)
+    status = robot.client.get_status()
+    if isinstance(status, dict):
+        simulation_enabled = status.get("simulation_enabled", False)
+        mockup_sim_enabled = status.get("mockup_sim_enabled", False)
+    else:
+        simulation_enabled = getattr(status, "simulation_enabled", False)
+        mockup_sim_enabled = getattr(status, "mockup_sim_enabled", False)
 
-    camera_worker, _, vision_manager = handle_vision_stuff(args, robot)
+    is_simulation = simulation_enabled or mockup_sim_enabled
+
+    if is_simulation and not args.gradio:
+        logger.info("Simulation mode detected. Automatically enabling gradio flag.")
+        args.gradio = True
+
+    try:
+        camera_worker, vision_processor = initialize_camera_and_vision(args, robot)
+    except CameraVisionInitializationError as e:
+        logger.error("Failed to initialize camera/vision: %s", e)
+        sys.exit(1)
 
     # Initialize face recognition (optional - gracefully handles missing dependencies)
     face_db = None
@@ -129,7 +141,7 @@ def run(
         reachy_mini=robot,
         movement_manager=movement_manager,
         camera_worker=camera_worker,
-        vision_manager=vision_manager,
+        vision_processor=vision_processor,
         head_wobbler=head_wobbler,
         face_db=face_db,
         face_recognizer=face_recognizer,
@@ -198,8 +210,6 @@ def run(
     head_wobbler.start()
     if camera_worker:
         camera_worker.start()
-    if vision_manager:
-        vision_manager.start()
 
     def poll_stop_event() -> None:
         """Poll the stop event to allow graceful shutdown."""
@@ -224,8 +234,6 @@ def run(
         head_wobbler.stop()
         if camera_worker:
             camera_worker.stop()
-        if vision_manager:
-            vision_manager.stop()
 
         # Ensure media is explicitly closed before disconnecting
         try:

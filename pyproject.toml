@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "reachy_mini_conversation_app"
-version = "0.2.2"
+version = "0.4.1"
 authors = [{ name = "Pollen Robotics", email = "contact@pollen-robotics.com" }]
 description = ""
 readme = "README.md"
@@ -21,24 +21,21 @@ dependencies = [
     "python-dotenv",
 
     #OpenAI
-    "openai>=2.1",
+    "openai==2.28.0",
 
     #Reachy mini
     "reachy_mini_dances_library",
     "reachy_mini_toolbox",
-    "reachy-mini >= 1.2.11",
+    "reachy-mini>=1.5.1",
     "eclipse-zenoh~=1.7.0",
     "gradio_client>=1.13.3",
 ]
 
 [project.optional-dependencies]
-reachy_mini_wireless = [
-  "PyGObject>=3.42.2,<=3.46.0", 
-  "gst-signalling>=1.1.2",
-]
 local_vision = [
+  "accelerate>=1.13.0",
   "torch>=2.1",
-  "transformers==5.0.0rc2",
+  "transformers==5.3.0",
   "num2words",
 ]
 yolo_vision = [
@@ -49,8 +46,9 @@ mediapipe_vision = [
   "mediapipe==0.10.14",
 ]
 all_vision = [
+  "accelerate>=1.13.0",
   "torch>=2.1",
-  "transformers==5.0.0rc2",
+  "transformers==5.3.0",
   "num2words",
   "ultralytics",
   "supervision",
@@ -87,6 +85,13 @@ dev = [
 [project.scripts]
 reachy-mini-conversation-app = "reachy_mini_conversation_app.main:main"
 
+[tool.uv]
+dependency-metadata = [
+    # Upstream metadata currently marks `gstreamer-msvc-runtime` as unconditional.
+    # It should only be required on Windows. Temp fix.
+    { name = "gstreamer-libs", version = "1.28.1", requires-dist = ["gstreamer-msvc-runtime; sys_platform == 'win32'", "setuptools"] },
+]
+
 [project.entry-points."reachy_mini_apps"]
 reachy_mini_conversation_app = "reachy_mini_conversation_app.main:ReachyMiniConversationApp"
 
@@ -104,8 +109,11 @@ reachy_mini_conversation_app = [
   ".env.example",
   "demos/**/*.txt",
   "prompts_library/*.txt",
-  "profiles/**/*.txt",
   "prompts/**/*.txt",
+]
+reachy_talk_data = [
+  "profiles/**/*.txt",
+  "profiles/**/*.py",
 ]
 
 [tool.ruff]
